@@ -1,0 +1,138 @@
+// =========================================================================
+// 🌱 EcoCupid Taskboard Sync v2.0.0
+// =========================================================================
+
+// Project version
+const SYSTEM_VERSION = "2.0.0";
+
+// Enable/disable debug logging
+const DEBUG_MODE = true;
+
+// =========================================================================
+// 📊 SHEET CONFIGURATION
+// =========================================================================
+
+const SHEET_NAME = "Tasks";
+const TEAM_SHEET_NAME = "Team";
+
+// Template row used for copying formulas into newly created rows.
+// Keep this pointing to your first data row.
+const TEMPLATE_ROW = 2;
+
+// =========================================================================
+// 📅 GOOGLE CALENDAR
+// =========================================================================
+
+const CALENDAR_ID =
+  "c_dcf591979c7b42be287df9d9aeb50294ab78c87f3568988085b65dcd13cd3991@group.calendar.google.com";
+
+// =========================================================================
+// 📑 COLUMN MAP (0-indexed)
+// =========================================================================
+
+const COL = Object.freeze({
+
+  TASK_ID: 0,
+  COMPONENT: 1,
+  DESCRIPTION: 2,
+  PRIORITY: 3,
+  ASSIGNEE: 4,
+  DUE_DATE: 5,
+  STATUS: 6,
+  NOTES: 7,
+  REMINDER_DAYS: 8,
+  EVENT_ID: 9,
+  CREATED_AT: 10,
+  CREATED_SOURCE: 11,
+  SYNCED_AT: 12,
+  SYNC_HASH: 13
+
+});
+
+// =========================================================================
+// 📌 STATUS CONSTANTS
+// =========================================================================
+
+const STATUS = Object.freeze({
+
+  NOT_STARTED: "Not Started",
+  IN_PROGRESS: "In Progress",
+  BLOCKED: "Blocked",
+  ON_HOLD: "On Hold",
+  COMPLETED: "Completed",
+  CANCELLED: "Cancelled",
+  ARCHIVED: "Archived",
+  OVERDUE: "Overdue"
+
+});
+
+const CLOSED_STATUSES = Object.freeze([
+  STATUS.COMPLETED,
+  STATUS.CANCELLED,
+  STATUS.ARCHIVED
+]);
+
+// =========================================================================
+// 📝 CREATED SOURCE CONSTANTS
+// =========================================================================
+
+const CREATED_SOURCE = Object.freeze({
+
+  MANUAL: "Manual",
+  CALENDAR: "Calendar Import",
+  DISCORD: "Discord",
+  AUTOMATION: "Automation",
+  REPAIR: "Repair Tool",
+  MIGRATION: "Migration"
+
+});
+
+// =========================================================================
+// 📢 DISCORD
+// =========================================================================
+
+const DISCORD_WEBHOOK_URL =
+  "https://discord.com/api/webhooks/1519719221691420772/nDCSNGq2UrCsTlGeVbzPyW0j4_0EiBJcrkewNCtTLndlb0pkg9_6lCPEHb7RlFCIqIRi";
+
+
+// =========================================================================
+// 🔐 SYNC SETTINGS
+// =========================================================================
+
+// Maximum time to wait for another sync to finish
+const LOCK_WAIT_MS = 30000;
+
+// Number of columns expected in the Tasks sheet
+const NUM_COLUMNS = Object.keys(COL).length;
+
+// Number of days to look backwards when scanning Calendar
+const SYNC_LOOKBACK_DAYS = 30;
+
+// Number of days to look ahead when scanning Calendar
+const SYNC_LOOKAHEAD_DAYS = 365;
+
+// Default popup reminder for all-day events
+// 900 minutes = previous day at 9:00 AM
+const DEFAULT_REMINDER_MINUTES = 900;
+
+// =========================================================================
+// CALENDAR SETTINGS
+// =========================================================================
+
+const CALENDAR_EVENT_COLOR =
+  CalendarApp.EventColor.SAGE;
+
+  // =========================================================================
+// IMPORT DEFAULTS
+// =========================================================================
+
+// Component assigned to tasks imported
+// from Google Calendar.
+const DEFAULT_COMPONENT = "General";
+
+// Default note for imported tasks.
+const IMPORT_NOTE =
+  "Imported from Google Calendar";
+
+// Default reminder days for imported tasks.
+const DEFAULT_REMINDER_DAYS = "1";
