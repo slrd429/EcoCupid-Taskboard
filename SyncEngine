@@ -1,0 +1,2122 @@
+// =========================================================================
+// 🌱 EcoCupid Taskboard Sync
+//
+// File: SyncEngine.gs
+// Version: 2.0.0
+// Last Updated: 2026-07-03
+//
+// Unit 1
+// Core Framework
+// =========================================================================
+
+function runSync(isManual = false) {
+
+  const lock = LockService.getScriptLock();
+
+  let runtime = null;
+
+  try {
+
+    lock.waitLock(LOCK_WAIT_MS);
+
+  } catch (err) {
+
+    Logger.log(
+      "[EcoCupid Sync] Another synchronization is already running."
+    );
+
+    return {
+      success: false,
+      reason: "LOCK_TIMEOUT"
+    };
+
+  }
+
+  try {
+
+    runtime = createRuntime(isManual);
+
+    debugLog("Synchronization started.");
+
+    // ============================================================
+    // Calendar → Sheet
+    // ============================================================
+
+    calendarPhase1(runtime);
+
+    matchCalendarEvents(runtime);
+
+    syncExistingCalendarTasks(runtime);
+
+    importCalendarTasks(runtime);
+
+    finalizeCalendarSync(runtime);
+
+    // ============================================================
+    // Sheet → Calendar
+    // ============================================================
+
+    syncSheetToCalendar(runtime);
+
+    runtime.summary.success = true;
+
+    logSummary(runtime.summary);
+
+    return runtime.summary;
+
+  } catch (err) {
+
+    if (runtime && runtime.summary) {
+      runtime.summary.errors++;
+    }
+
+    Logger.log(
+      "[EcoCupid Sync] ERROR: " + err.message
+    );
+
+    throw err;
+
+  } finally {
+
+    lock.releaseLock();
+
+  }
+
+}
+
+/**
+ * Builds the runtime object used throughout the sync.
+ */
+function createRuntime(isManual) {
+
+  const spreadsheet =
+    SpreadsheetApp.getActiveSpreadsheet();
+
+  const sheet =
+    spreadsheet.getSheetByName(SHEET_NAME);
+
+  if (!sheet) {
+    throw new Error(
+      `Sheet "${SHEET_NAME}" not found.`
+    );
+  }
+
+  const calendar =
+    CalendarApp.getCalendarById(CALENDAR_ID);
+
+  if (!calendar) {
+    throw new Error(
+      "Calendar could not be opened."
+    );
+  }
+
+  return {
+
+    startedAt: new Date(),
+
+    isManual,
+
+    spreadsheet,
+
+    sheet,
+
+    calendar,
+
+    summary: createSummary(),
+
+    // Calendar → Sheet
+    calendarEvents: [],
+    calendarEventMap: new Map(),
+
+    // Sheet → Calendar
+    sheetTasks: [],
+    validTasks: [],
+    invalidTasks: [],
+    closedTasks: [],
+
+    // Batched spreadsheet writes
+    pendingUpdates: new Map()
+
+  };
+
+}
+
+/**
+ * Creates a blank synchronization summary.
+ */
+function createSummary() {
+
+  return {
+
+    success: false,
+
+    scannedTasks: 0,
+
+    scannedEvents: 0,
+
+    matchedEvents: 0,
+
+    unmatchedEvents: 0,
+
+    imported: 0,
+
+    updated: 0,
+
+    unchanged: 0,
+
+    createdEvents: 0,
+
+    updatedEvents: 0,
+
+    deletedEvents: 0,
+
+    repairedRows: 0,
+
+    warnings: 0,
+
+    errors: 0
+
+  };
+
+}
+
+/**
+ * Writes debug messages only when DEBUG_MODE is enabled.
+ */
+function debugLog(message) {
+
+  if (!DEBUG_MODE) return;
+
+  Logger.log(
+    "[EcoCupid Sync] " + message
+  );
+
+}
+
+/**
+ * Logs the synchronization summary.
+ */
+function logSummary(summary) {
+
+  Logger.log("========== EcoCupid Sync ==========");
+
+  Logger.log("Success: " + summary.success);
+
+  Logger.log("Tasks Scanned: " + summary.scannedTasks);
+
+  Logger.log("Events Scanned: " + summary.scannedEvents);
+
+  Logger.log("Matched Events: " + summary.matchedEvents);
+
+  Logger.log("Unmatched Events: " + summary.unmatchedEvents);
+
+  Logger.log("Imported Tasks: " + summary.imported);
+
+  Logger.log("Updated Tasks: " + summary.updated);
+
+  Logger.log("Unchanged Tasks: " + summary.unchanged);
+
+  Logger.log("Events Created: " + summary.createdEvents);
+
+  Logger.log("Events Updated: " + summary.updatedEvents);
+
+  Logger.log("Events Deleted: " + summary.deletedEvents);
+
+  Logger.log("Rows Repaired: " + summary.repairedRows);
+
+  Logger.log("Warnings: " + summary.warnings);
+
+  Logger.log("Errors: " + summary.errors);
+
+  Logger.log("===================================");
+
+}
+
+// =========================================================================
+// UNIT 2
+// Task Model & Validation
+// =========================================================================
+
+/**
+ * Generates a guaranteed-unique Task ID.
+ */
+function generateTaskId() {
+
+  const sheet =
+    SpreadsheetApp.getActiveSpreadsheet()
+      .getSheetByName(SHEET_NAME);
+
+  const lastRow = sheet.getLastRow();
+
+  if (lastRow <= 1) {
+    return createRandomTaskId();
+  }
+
+  const existingIds = new Set(
+
+    sheet
+      .getRange(
+        2,
+        COL.TASK_ID + 1,
+        lastRow - 1,
+        1
+      )
+      .getValues()
+      .flat()
+      .map(id => id.toString().trim())
+      .filter(id => id !== "")
+
+  );
+
+  let newId;
+
+  do {
+
+    newId = createRandomTaskId();
+
+  } while (existingIds.has(newId));
+
+  return newId;
+
+}
+
+/**
+ * Creates a random Task ID.
+ */
+function createRandomTaskId() {
+
+  return (
+    "TASK-" +
+    Math.floor(
+      100000 + Math.random() * 900000
+    )
+  );
+
+}
+
+/**
+ * Converts a spreadsheet row into a task object.
+ */
+function buildTaskObject(rowData, rowNumber) {
+
+  return {
+
+    row: rowNumber,
+
+    taskId:
+      normalizeString(
+        rowData[COL.TASK_ID]
+      ),
+
+    component:
+      normalizeString(
+        rowData[COL.COMPONENT]
+      ),
+
+    description:
+      normalizeString(
+        rowData[COL.DESCRIPTION]
+      ),
+
+    priority:
+      normalizeString(
+        rowData[COL.PRIORITY]
+      ),
+
+    assignee:
+      normalizeString(
+        rowData[COL.ASSIGNEE]
+      ),
+
+    dueDate:
+      rowData[COL.DUE_DATE],
+
+    status:
+      normalizeString(
+        rowData[COL.STATUS]
+      ),
+
+    notes:
+      normalizeString(
+        rowData[COL.NOTES]
+      ),
+
+    reminderDays:
+      normalizeString(
+        rowData[COL.REMINDER_DAYS]
+      ),
+
+    eventId:
+      normalizeString(
+        rowData[COL.EVENT_ID]
+      ),
+
+    createdAt:
+      rowData[COL.CREATED_AT],
+
+    createdSource:
+      normalizeString(
+        rowData[COL.CREATED_SOURCE]
+      ),
+
+    syncedAt:
+      rowData[COL.SYNCED_AT],
+
+    syncHash:
+      normalizeString(
+        rowData[COL.SYNC_HASH]
+      )
+
+  };
+
+}
+
+/**
+ * Determines whether a task is completely empty.
+ */
+function isEmptyTask(task) {
+
+  return (
+
+    task.taskId === "" &&
+    task.description === "" &&
+    task.eventId === ""
+
+  );
+
+}
+
+/**
+ * Determines whether a task is closed.
+ */
+function isClosedTask(task) {
+
+  return CLOSED_STATUSES.includes(
+    task.status
+  );
+
+}
+
+/**
+ * Performs validation checks before syncing.
+ */
+function validateTask(task) {
+
+  const issues = [];
+
+  if (
+    task.description === "" &&
+    task.eventId !== ""
+  ) {
+
+    issues.push(
+      "Task has Event ID but no description."
+    );
+
+  }
+
+  if (
+    task.description !== "" &&
+    !task.dueDate
+  ) {
+
+    issues.push(
+      "Task has no due date."
+    );
+
+  }
+  if (
+    task.eventId !== "" &&
+    task.taskId === ""
+  ) {
+
+    issues.push(
+      "Task has Event ID but no Task ID."
+    );
+
+  }
+
+  return issues;
+
+}
+
+/**
+ * Normalizes sheet values into strings.
+ */
+function normalizeString(value) {
+
+  if (
+    value === null ||
+    value === undefined
+  ) {
+
+    return "";
+
+  }
+
+  return value
+    .toString()
+    .trim();
+
+}
+
+/**
+ * Returns the logical state of a task.
+ *
+ * This includes every user-editable field that
+ * participates in synchronization.
+ */
+function getTaskState(task) {
+
+  return {
+
+    component:
+      normalizeString(task.component),
+
+    description:
+      normalizeString(task.description),
+
+    assignee:
+      normalizeString(task.assignee),
+
+    dueDate:
+      task.dueDate
+        ? Utilities.formatDate(
+            new Date(task.dueDate),
+            Session.getScriptTimeZone(),
+            "yyyy-MM-dd"
+          )
+        : "",
+
+    priority:
+      normalizeString(task.priority),
+
+    status:
+      normalizeString(task.status),
+
+    notes:
+      normalizeString(task.notes),
+
+    reminderDays:
+      normalizeString(task.reminderDays)
+
+  };
+
+}
+
+/**
+ * Builds a synchronization hash for a task.
+ */
+function buildTaskHash(task) {
+
+  return JSON.stringify(
+
+    getTaskState(task)
+
+  );
+
+}
+
+/**
+ * Parses a stored Sync Hash.
+ *
+ * Returns an empty task state if the hash
+ * is missing or invalid.
+ */
+function parseTaskHash(hash) {
+
+  if (!hash) {
+    return {};
+  }
+
+  try {
+
+    return JSON.parse(hash);
+
+  } catch (err) {
+
+    return {};
+
+  }
+
+}
+
+/**
+ * Returns true if the Sheet task has changed
+ * since the last successful sync.
+ */
+function hasSheetChanged(task) {
+
+  const previousState =
+    parseTaskHash(task.syncHash);
+
+  const currentState =
+    getTaskState(task);
+
+  return JSON.stringify(previousState) !==
+         JSON.stringify(currentState);
+
+}
+
+function getChangedSheetFields(task) {
+
+  return getChangedFields(
+
+    parseTaskHash(task.syncHash),
+
+    getTaskState(task)
+
+  );
+
+}
+
+/**
+ * Returns Calendar-owned fields that changed
+ * since the last synchronization.
+ */
+function getChangedCalendarFields(task, event) {
+
+  const previous =
+    parseTaskHash(task.syncHash);
+
+  const current =
+    getCalendarState(event);
+
+  const changed = [];
+
+  if (
+
+    previous.dueDate !== current.dueDate
+
+  ) {
+
+    changed.push("dueDate");
+
+  }
+
+  return changed;
+
+}
+
+/**
+ * Determines how a task should be synchronized.
+ */
+function classifyTaskChanges(task, event) {
+
+  const sheetChanges =
+    getChangedSheetFields(task);
+
+  const calendarChanges =
+    getChangedCalendarFields(task, event);
+
+  return {
+
+    sheetChanges,
+
+    calendarChanges,
+
+    sheetChanged:
+      sheetChanges.length > 0,
+
+    calendarChanged:
+      calendarChanges.length > 0
+
+  };
+
+}
+
+/**
+ * Returns every field whose value differs
+ * between two state objects.
+ */
+function getChangedFields(previous, current) {
+
+  const changed = [];
+
+  const keys = new Set([
+
+    ...Object.keys(previous),
+
+    ...Object.keys(current)
+
+  ]);
+
+  keys.forEach(key => {
+
+    if (previous[key] !== current[key]) {
+
+      changed.push(key);
+
+    }
+
+  });
+
+  return changed;
+
+}
+
+
+// =========================================================================
+// UNIT 3
+// Safe Sheet Updates & Formula Repair
+// =========================================================================
+
+/**
+ * Maps task object fields to spreadsheet columns.
+ */
+const TASK_FIELD_COLUMNS = {
+
+  taskId: COL.TASK_ID,
+  component: COL.COMPONENT,
+  description: COL.DESCRIPTION,
+  priority: COL.PRIORITY,
+  assignee: COL.ASSIGNEE,
+  dueDate: COL.DUE_DATE,
+  status: COL.STATUS,
+  notes: COL.NOTES,
+  reminderDays: COL.REMINDER_DAYS,
+  eventId: COL.EVENT_ID,
+  createdAt: COL.CREATED_AT,
+  createdSource: COL.CREATED_SOURCE,
+  syncedAt: COL.SYNCED_AT,
+  syncHash: COL.SYNC_HASH
+
+};
+
+/**
+ * Queues updates to a spreadsheet row.
+ *
+ * Updates are batched and written together during
+ * finalizeCalendarSync() or finalizeSheetSync().
+ *
+ * @param {Object} runtime
+ * @param {Number} rowNumber Spreadsheet row number (1-indexed)
+ * @param {Object} updates Column/value pairs
+ * @param {Object=} task Optional normalized task object
+ */
+function queueTaskUpdates(runtime, rowNumber, updates, task) {
+
+  const existing =
+    runtime.pendingUpdates.get(rowNumber) || {};
+
+  Object.assign(existing, updates);
+
+  // Automatically refresh the stored Sync Hash
+  // whenever we know the task's current state.
+  if (task) {
+
+    existing.syncHash =
+      buildTaskHash(task);
+
+  }
+
+  runtime.pendingUpdates.set(
+    rowNumber,
+    existing
+  );
+
+}
+
+/**
+ * Applies all queued updates to the spreadsheet.
+ */
+function flushTaskUpdates(runtime) {
+
+  const updates = runtime.pendingUpdates;
+
+  if (updates.size === 0) {
+
+    debugLog(
+      "No pending sheet updates."
+    );
+
+    return;
+
+  }
+
+  const sheet = runtime.sheet;
+
+  let rowsUpdated = 0;
+
+  updates.forEach((fields, rowNumber) => {
+
+    Logger.log(JSON.stringify(fields, null, 2));
+    
+    Object.entries(fields).forEach(([field, value]) => {
+
+      const column =
+        TASK_FIELD_COLUMNS[field];
+
+      if (column === undefined) {
+
+        throw new Error(
+          `Unknown task field "${field}".`
+        );
+
+      }
+
+      sheet
+        .getRange(
+          rowNumber,
+          column + 1
+        )
+        .setValue(value);
+
+    });
+
+    rowsUpdated++;
+
+  });
+
+  updates.clear();
+
+  debugLog(
+    `Flushed ${rowsUpdated} pending row update(s).`
+  );
+
+}
+
+/**
+ * Appends a brand-new task.
+ *
+ * Returns the created row number.
+ */
+function appendTask(runtime, task) {
+
+  const sheet = runtime.sheet;
+
+  const row = sheet.getLastRow() + 1;
+
+  sheet
+    .getRange(
+      row,
+      1,
+      1,
+      NUM_COLUMNS
+    )
+    .setValues([[
+
+      task.taskId,
+      task.component,
+      task.description,
+      "",
+      task.assignee,
+      task.dueDate,
+      task.status,
+      task.notes,
+      task.reminderDays,
+      task.eventId,
+      task.createdAt,
+      task.createdSource,
+      task.syncedAt,
+      buildTaskHash(task)
+
+    ]]);
+
+  copyPriorityFormula(runtime, row);
+
+  return row;
+
+}
+
+/**
+ * Repairs missing Priority formulas.
+ */
+function repairPriorityFormulas(runtime) {
+
+  const sheet = runtime.sheet;
+
+  const lastRow = sheet.getLastRow();
+
+  if (lastRow <= TEMPLATE_ROW) return;
+
+  const formulas =
+    sheet
+      .getRange(
+        TEMPLATE_ROW + 1,
+        COL.PRIORITY + 1,
+        lastRow - TEMPLATE_ROW,
+        1
+      )
+      .getFormulas();
+
+  const descriptions =
+    sheet
+      .getRange(
+        TEMPLATE_ROW + 1,
+        COL.DESCRIPTION + 1,
+        lastRow - TEMPLATE_ROW,
+        1
+      )
+      .getValues();
+
+  const rowsToRepair = [];
+
+  formulas.forEach((formulaRow, index) => {
+
+    const hasFormula =
+      formulaRow[0] !== "";
+
+    const hasDescription =
+      normalizeString(
+        descriptions[index][0]
+      ) !== "";
+
+    if (!hasFormula && hasDescription) {
+
+      rowsToRepair.push(
+        TEMPLATE_ROW + 1 + index
+      );
+
+    }
+
+  });
+
+  rowsToRepair.forEach(row => {
+
+    copyPriorityFormula(runtime, row);
+
+    runtime.summary.repairedRows++;
+
+    debugLog(
+      `Priority formula repaired on row ${row}.`
+    );
+
+  });
+
+}
+
+/**
+ * Copies the template Priority formula.
+ */
+function copyPriorityFormula(runtime, rowNumber) {
+
+  runtime.sheet
+    .getRange(
+      TEMPLATE_ROW,
+      COL.PRIORITY + 1
+    )
+    .copyTo(
+
+      runtime.sheet.getRange(
+        rowNumber,
+        COL.PRIORITY + 1
+      ),
+
+      SpreadsheetApp.CopyPasteType.PASTE_FORMULA,
+      false
+
+    );
+
+}
+
+// =========================================================================
+// UNIT 4A
+// Calendar Loading & Event Indexing
+// =========================================================================
+
+/**
+ * Loads calendar events into normalized task objects.
+ *
+ * This unit DOES NOT modify the spreadsheet.
+ * It only prepares calendar data for later sync stages.
+ */
+function loadCalendarEvents(runtime) {
+
+  const now = new Date();
+
+  const windowStart = new Date(now);
+  windowStart.setMonth(windowStart.getMonth() - 3);
+
+  const windowEnd = new Date(now);
+  windowEnd.setMonth(windowEnd.getMonth() + 4);
+
+  const events =
+    runtime.calendar.getEvents(
+      windowStart,
+      windowEnd
+    );
+
+  runtime.summary.scannedEvents = events.length;
+
+  runtime.calendarEvents = [];
+
+  runtime.calendarEventMap = new Map();
+
+  events.forEach(event => {
+
+    const parsed =
+      parseCalendarEvent(event);
+
+    runtime.calendarEvents.push(parsed);
+
+    runtime.calendarEventMap.set(
+      parsed.eventId,
+      parsed
+    );
+
+  });
+
+}
+
+/**
+ * Converts a Calendar event into a normalized object.
+ */
+function parseCalendarEvent(event) {
+
+  const rawTitle =
+    normalizeString(
+      event.getTitle()
+    );
+
+  let title =
+    rawTitle.replace(
+      /^(🚨\s*Overdue\s*\||🛑\s*Blocked\s*\|)\s*/i,
+      ""
+    );
+
+  let assignee = "";
+
+  const match =
+    title.match(/^\[(.*?)\]\s*(.*)$/);
+
+  if (match) {
+
+    assignee =
+      normalizeString(match[1]);
+
+    title =
+      normalizeString(match[2]);
+
+    if (assignee === "Unassigned") {
+      assignee = "";
+    }
+
+  }
+
+  return {
+
+    eventId:
+      normalizeString(
+        event.getId()
+      ),
+
+    description:
+      title,
+
+    assignee,
+
+    dueDate:
+      event.isAllDayEvent()
+        ? event.getAllDayStartDate()
+        : event.getStartTime(),
+
+    rawTitle,
+
+    calendarEvent:
+      event
+
+  };
+
+}
+
+/**
+ * Builds a lookup map of Event IDs already present
+ * in the spreadsheet.
+ *
+ * Each entry stores:
+ * • row number
+ * • normalized task object
+ */
+function buildSheetEventMap(runtime) {
+
+  const sheet = runtime.sheet;
+
+  const lastRow = sheet.getLastRow();
+
+  runtime.sheetEventMap = new Map();
+
+  if (lastRow <= 1) return;
+
+  const values =
+    sheet
+      .getRange(
+        2,
+        1,
+        lastRow - 1,
+        NUM_COLUMNS
+      )
+      .getValues();
+
+  values.forEach((rowValues, index) => {
+
+    const rowNumber = index + 2;
+
+    const task =
+      buildTaskObject(
+        rowValues,
+        rowNumber
+      );
+
+    if (!task.eventId) {
+      return;
+    }
+
+    if (runtime.sheetEventMap.has(task.eventId)) {
+
+      runtime.summary.warnings++;
+
+      debugLog(
+
+        `Duplicate Event ID "${task.eventId}" found on row ${rowNumber}. Keeping first occurrence.`
+
+      );
+
+      return;
+
+    }
+
+    runtime.sheetEventMap.set(
+
+      task.eventId,
+
+      {
+
+        row: rowNumber,
+
+        task
+
+      }
+
+    );
+
+  });
+
+}
+
+/**
+ * Calendar → Sheet Phase 1
+ */
+function calendarPhase1(runtime) {
+
+  debugLog(
+    "Loading Calendar events..."
+  );
+
+  loadCalendarEvents(runtime);
+
+  buildSheetEventMap(runtime);
+
+  debugLog(
+    `Loaded ${runtime.calendarEvents.length} calendar events.`
+  );
+
+}
+
+// =========================================================================
+// UNIT 4B
+// Event Matching
+// =========================================================================
+
+/**
+ * Matches calendar events against existing sheet tasks.
+ *
+ * Produces:
+ *   runtime.matches
+ *   runtime.unmatchedCalendarEvents
+ *
+ * This phase performs NO writes.
+ */
+function matchCalendarEvents(runtime) {
+
+  runtime.matches = [];
+  runtime.unmatchedCalendarEvents = [];
+
+  runtime.calendarEvents.forEach(calendarTask => {
+
+    const match =
+      runtime.sheetEventMap.get(
+        calendarTask.eventId
+      );
+
+    if (!match) {
+
+      runtime.unmatchedCalendarEvents.push(
+        calendarTask
+      );
+
+      return;
+
+    }
+
+    runtime.matches.push({
+
+      row: match.row,
+
+      sheetTask: match.task,
+
+      calendarTask
+
+    });
+
+  });
+
+  runtime.summary.matchedEvents =
+    runtime.matches.length;
+
+  runtime.summary.unmatchedEvents =
+    runtime.unmatchedCalendarEvents.length;
+
+  debugLog(
+
+    `Matched ${runtime.matches.length} existing events.`
+
+  );
+
+  debugLog(
+
+    `${runtime.unmatchedCalendarEvents.length} calendar events require import.`
+
+  );
+
+}
+
+// =========================================================================
+// UNIT 4C
+// Existing Calendar Task Synchronization
+// =========================================================================
+
+/**
+ * Synchronizes all matched Calendar events with existing sheet rows.
+ *
+ * This phase DOES NOT write directly to the spreadsheet.
+ * It only queues updates.
+ */
+function syncExistingCalendarTasks(runtime) {
+
+  runtime.matches.forEach(match => {
+
+    syncMatchedTask(runtime, match);
+
+  });
+
+}
+
+/**
+ * Synchronizes one matched Calendar/Sheet pair.
+ */
+function syncMatchedTask(runtime, match) {
+
+  const sheetTask = match.sheetTask;
+  const calendarTask = match.calendarTask;
+
+  const updates = {};
+
+  // ----------------------------------------------------
+  // Status Prefix Detection
+  // ----------------------------------------------------
+
+  const calendarStatus =
+    getCalendarStatus(
+      calendarTask.rawTitle
+    );
+
+  if (
+    calendarStatus !== "" &&
+    calendarStatus !== sheetTask.status
+  ) {
+
+    updates.status =
+      calendarStatus;
+
+  }
+
+  // ----------------------------------------------------
+  // Queue updates
+  // ----------------------------------------------------
+
+  if (Object.keys(updates).length === 0) {
+
+    runtime.summary.unchanged++;
+
+    return;
+
+  }
+
+  updates.syncedAt = new Date();
+
+  queueTaskUpdates(
+
+    runtime,
+
+    sheetTask.row,
+
+    updates,
+
+    {
+
+      ...sheetTask,
+
+      ...updates
+
+    }
+
+  );
+
+  runtime.summary.updated++;
+
+  debugLog(
+
+    `Queued update for row ${sheetTask.row}.`
+
+  );
+
+}
+
+/**
+ * Detects user-controlled Calendar status prefixes.
+ *
+ * Overdue is a visual indicator only and should
+ * never overwrite the Sheet status.
+ */
+function getCalendarStatus(title) {
+
+  const clean =
+    normalizeString(title);
+
+  if (clean.startsWith("🛑 Blocked |")) {
+    return STATUS.BLOCKED;
+  }
+
+  // Ignore Overdue.
+  return "";
+
+}
+
+/**
+ * Compares two dates safely.
+ */
+function datesEqual(a, b) {
+
+  if (!(a instanceof Date)) return false;
+
+  if (!(b instanceof Date)) return false;
+
+  return a.getTime() === b.getTime();
+
+}
+
+// =========================================================================
+// UNIT 4D
+// Calendar → Sheet Imports
+// =========================================================================
+
+/**
+ * Imports Calendar events that do not yet exist in the sheet.
+ */
+function importCalendarTasks(runtime) {
+
+  runtime.unmatchedCalendarEvents.forEach(calendarTask => {
+
+    importCalendarTask(runtime, calendarTask);
+
+  });
+
+}
+
+/**
+ * Imports a single Calendar event.
+ */
+function importCalendarTask(runtime, calendarTask) {
+
+  const task = {
+
+    row: null,
+
+    taskId:
+      generateTaskId(),
+
+    component:
+      DEFAULT_COMPONENT,
+
+    description:
+      calendarTask.description,
+
+    priority:
+      "",
+
+    assignee:
+      calendarTask.assignee,
+
+    dueDate:
+      calendarTask.dueDate,
+
+    status:
+      getImportedStatus(calendarTask),
+
+    notes:
+      IMPORT_NOTE,
+
+    reminderDays:
+      DEFAULT_REMINDER_DAYS,
+
+    eventId:
+      calendarTask.eventId,
+
+    createdAt:
+      new Date(),
+
+    createdSource:
+      CREATED_SOURCE.CALENDAR,
+
+    syncedAt:
+      new Date()
+
+  };
+
+  const row =
+    appendTask(runtime, task);
+
+  runtime.sheetEventMap.set(
+
+    task.eventId,
+
+    {
+
+      row,
+
+      task
+
+    }
+
+  );
+
+  runtime.summary.imported++;
+
+  debugLog(
+
+    `Imported calendar event "${task.description}" on row ${row}.`
+
+  );
+
+}
+
+function getImportedStatus(calendarTask) {
+
+  const title =
+    calendarTask.rawTitle;
+
+  if (title.startsWith("🛑 Blocked |")) {
+    return STATUS.BLOCKED;
+  }
+
+  return STATUS.NOT_STARTED;
+
+}
+
+// =========================================================================
+// UNIT 4E
+// Calendar → Sheet Finalization
+// =========================================================================
+
+/**
+ * Finalizes the Calendar → Sheet synchronization.
+ *
+ * This is the ONLY phase that actually writes queued
+ * sheet updates.
+ */
+function finalizeCalendarSync(runtime) {
+
+  debugLog(
+    "Finalizing Calendar synchronization..."
+  );
+
+  // Apply all queued field updates.
+  flushTaskUpdates(runtime);
+
+  // Ensure every task has a live Priority formula.
+  repairPriorityFormulas(runtime);
+
+}
+
+// =========================================================================
+// UNIT 5A
+// Sheet → Calendar
+// Load Sheet Tasks
+// =========================================================================
+
+/**
+ * Synchronizes spreadsheet tasks to Google Calendar.
+ */
+function syncSheetToCalendar(runtime) {
+
+  loadSheetTasks(runtime);
+
+  validateSheetTasks(runtime);
+
+  syncExistingCalendarEvents(runtime);
+
+  createMissingCalendarEvents(runtime);
+
+  deleteClosedCalendarEvents(runtime);
+
+}
+
+/**
+ * Loads every task from the spreadsheet.
+ */
+function loadSheetTasks(runtime) {
+
+  const sheet = runtime.sheet;
+
+  const lastRow = sheet.getLastRow();
+
+  runtime.sheetTasks = [];
+
+  if (lastRow <= 1) {
+    return;
+  }
+
+  const values = sheet
+    .getRange(
+      2,
+      1,
+      lastRow - 1,
+      NUM_COLUMNS
+    )
+    .getValues();
+
+  values.forEach((rowValues, index) => {
+
+    const task = buildTaskObject(
+      rowValues,
+      index + 2
+    );
+
+    runtime.sheetTasks.push(task);
+
+  });
+
+  runtime.summary.scannedTasks =
+    runtime.sheetTasks.length;
+
+  debugLog(
+    `Loaded ${runtime.sheetTasks.length} sheet tasks.`
+  );
+
+}
+
+// =========================================================================
+// UNIT 5B
+// Sheet Task Validation
+// =========================================================================
+
+/**
+ * Validates every sheet task and classifies it for
+ * later synchronization stages.
+ */
+function validateSheetTasks(runtime) {
+
+  runtime.validTasks = [];
+  runtime.invalidTasks = [];
+  runtime.closedTasks = [];
+
+  runtime.sheetTasks.forEach(task => {
+
+    classifyTask(runtime, task);
+
+  });
+
+  debugLog(
+    `Valid: ${runtime.validTasks.length}`
+  );
+
+  debugLog(
+    `Closed: ${runtime.closedTasks.length}`
+  );
+
+  debugLog(
+    `Invalid: ${runtime.invalidTasks.length}`
+  );
+
+}
+
+/**
+ * Classifies a task into one of three buckets.
+ */
+function classifyTask(runtime, task) {
+
+  const issues = validateTask(task);
+
+  if (issues.length > 0) {
+
+    runtime.invalidTasks.push({
+
+      task,
+      issues
+
+    });
+
+    runtime.summary.warnings++;
+
+    debugLog(
+
+      `Skipping row ${task.row}: ${issues.join("; ")}`
+
+    );
+
+    return;
+
+  }
+
+  if (isClosedTask(task)) {
+
+    runtime.closedTasks.push(task);
+
+    return;
+
+  }
+
+  runtime.validTasks.push(task);
+
+}
+
+// =========================================================================
+// UNIT 5C
+// Sheet → Calendar
+// Existing Calendar Events
+// =========================================================================
+
+/**
+ * Synchronizes all sheet tasks that already have
+ * Calendar Event IDs.
+ */
+function syncExistingCalendarEvents(runtime) {
+
+  runtime.validTasks.forEach(task => {
+
+    if (!task.eventId) {
+      return;
+    }
+
+    syncExistingCalendarEvent(runtime, task);
+
+  });
+
+}
+
+/**
+ * Synchronizes one existing Calendar event.
+ */
+function syncExistingCalendarEvent(runtime, task) {
+
+  let event = null;
+
+  try {
+
+    event =
+      runtime.calendar.getEventById(task.eventId);
+
+  } catch (err) {
+
+    event = null;
+
+  }
+
+  debugLog(
+    `Checking ${task.taskId}: event ${event ? "FOUND" : "MISSING"}`
+  );
+
+  // Event no longer exists.
+  // Allow Unit 5D to recreate it.
+  if (!event) {
+
+    const recreatedTask = {
+
+      ...task,
+
+      eventId: ""
+
+    };
+
+    queueTaskUpdates(
+
+      runtime,
+
+      task.row,
+
+      {
+
+        eventId: "",
+
+        syncedAt: new Date()
+
+      },
+
+      recreatedTask
+
+    );
+
+    runtime.summary.warnings++;
+
+    debugLog(
+
+      `Missing Calendar event for ${task.taskId}. Event ID cleared.`
+
+    );
+
+    return;
+
+  }
+
+  const comparison =
+    classifyTaskChanges(task, event);
+
+  const sheetChanged =
+    comparison.sheetChanged;
+
+  const calendarChanged =
+    comparison.calendarChanged;
+
+  const titleNeedsRefresh =
+    needsCalendarTitleRefresh(
+      task,
+      event
+    );
+
+  // ----------------------------------------------------
+  // Intelligent Sync Decision
+  // ----------------------------------------------------
+
+  if (
+    !sheetChanged &&
+    !calendarChanged &&
+    !titleNeedsRefresh
+  ) {
+
+    return;
+
+  }
+
+  // Refresh derived Calendar UI (e.g. overdue prefix)
+  // even when neither side was edited.
+  if (titleNeedsRefresh) {
+
+    pushSheetChangesToCalendar(
+      runtime,
+      task,
+      event
+    );
+
+    return;
+
+  }
+
+  if (
+    sheetChanged &&
+    !calendarChanged
+  ) {
+
+    pushSheetChangesToCalendar(
+      runtime,
+      task,
+      event
+    );
+
+    return;
+
+  }
+
+  if (
+    !sheetChanged &&
+    calendarChanged
+  ) {
+
+    pullCalendarChangesToSheet(
+      runtime,
+      task,
+      event
+    );
+
+    return;
+
+  }
+
+  // Both changed.
+  resolveTaskConflict(
+    runtime,
+    task,
+    event
+  );
+
+}
+
+/**
+ * Pushes Sheet-owned changes to Calendar.
+ */
+function pushSheetChangesToCalendar(runtime, task, event) {
+
+  let changed = false;
+
+  // ----------------------------
+  // Presentation
+  // ----------------------------
+
+  const desiredTitle =
+    buildCalendarTitle(task);
+
+  const desiredDescription =
+    buildCalendarDescription(task);
+
+  if (
+    event.getTitle() !== desiredTitle ||
+    event.getDescription() !== desiredDescription
+  ) {
+
+    applyCalendarFormatting(
+      event,
+      task
+    );
+
+    changed = true;
+
+  }
+
+  // ----------------------------
+  // Due Date
+  // ----------------------------
+
+  const currentDate =
+    event.isAllDayEvent()
+      ? event.getAllDayStartDate()
+      : event.getStartTime();
+
+  if (!datesEqual(currentDate, task.dueDate)) {
+
+    event.setAllDayDate(
+      new Date(task.dueDate)
+    );
+
+    changed = true;
+
+  }
+
+  // ----------------------------
+  // Reminder + Sync Metadata
+  // ----------------------------
+
+  if (changed) {
+
+    setEventReminders(
+      event,
+      task.reminderDays
+    );
+
+    queueTaskUpdates(
+
+      runtime,
+
+      task.row,
+
+      {
+
+        syncedAt: new Date()
+
+      },
+
+      task
+
+    );
+
+    runtime.summary.updatedEvents++;
+
+  }
+
+}
+
+/**
+ * Pulls Calendar-owned changes into the Sheet.
+ */
+function pullCalendarChangesToSheet(runtime, task, event) {
+
+  queueTaskUpdates(
+
+    runtime,
+
+    task.row,
+
+    {
+
+      dueDate:
+        event.isAllDayEvent()
+          ? event.getAllDayStartDate()
+          : event.getStartTime(),
+
+      syncedAt: new Date()
+
+    },
+
+    {
+
+      ...task,
+
+      dueDate:
+        event.isAllDayEvent()
+          ? event.getAllDayStartDate()
+          : event.getStartTime()
+
+    }
+
+  );
+
+  runtime.summary.updated++;
+
+}
+
+/**
+ * Resolves simultaneous Sheet and Calendar edits.
+ *
+ * Merge strategy:
+ * - Sheet owns metadata.
+ * - Calendar owns due date.
+ */
+function resolveTaskConflict(runtime, task, event) {
+
+  const merged =
+    mergeTaskState(task, event);
+
+  // Update Calendar using merged data.
+  pushSheetChangesToCalendar(
+
+    runtime,
+
+    merged,
+
+    event
+
+  );
+
+  // Update Sheet using merged data.
+  queueTaskUpdates(
+
+    runtime,
+
+    task.row,
+
+    {
+
+      dueDate:
+        event.isAllDayEvent()
+          ? event.getAllDayStartDate()
+          : event.getStartTime(),
+
+      syncedAt: new Date()
+
+    },
+
+    merged
+
+  );
+
+  runtime.summary.updated++;
+
+}
+
+/**
+ * Merges Sheet and Calendar changes into
+ * one unified task state.
+ */
+function mergeTaskState(task, event) {
+
+  const merged = {
+
+    ...task
+
+  };
+
+  // Sheet owns due date.
+  merged.dueDate =
+    task.dueDate;
+
+  return merged;
+
+}
+
+// =========================================================================
+// UNIT 5D
+// Sheet → Calendar
+// Create Missing Calendar Events
+// =========================================================================
+
+/**
+ * Creates Calendar events for valid tasks that
+ * do not yet have an Event ID.
+ */
+function createMissingCalendarEvents(runtime) {
+
+  runtime.validTasks.forEach(task => {
+
+    if (task.eventId) {
+      return;
+    }
+
+    createCalendarEvent(runtime, task);
+
+  });
+
+}
+
+/**
+ * Creates a single Calendar event.
+ */
+function createCalendarEvent(runtime, task) {
+
+  const event =
+    calendarCreateEvent(task);
+
+  queueTaskUpdates(
+
+    runtime,
+
+    task.row,
+
+    {
+
+      eventId: event.getId(),
+
+      syncedAt: new Date()
+
+    },
+
+    task
+
+  );
+
+  runtime.summary.createdEvents++;
+
+  debugLog(
+    `Created Calendar event for ${task.taskId}.`
+  );
+
+}
+
+/**
+ * Returns true when the Calendar title no longer
+ * matches the title that should be displayed.
+ *
+ * This catches derived UI changes such as
+ * overdue prefixes without requiring the task
+ * itself to be edited.
+ */
+function needsCalendarTitleRefresh(task, event) {
+
+  return (
+    event.getTitle() !==
+    buildCalendarTitle(task)
+  );
+
+}
+
+// =========================================================================
+// UNIT 5E
+// Sheet → Calendar
+// Delete Closed Calendar Events & Finalize
+// =========================================================================
+
+/**
+ * Deletes Calendar events belonging to closed tasks.
+ */
+function deleteClosedCalendarEvents(runtime) {
+
+  Logger.log("Closed tasks: " + runtime.closedTasks.length);
+
+  runtime.closedTasks.forEach(task => {
+
+    Logger.log(
+      task.description +
+      " | " +
+      task.status +
+      " | " +
+      task.eventId
+    );
+
+    deleteCalendarEvent(runtime, task);
+
+  });
+
+  finalizeSheetSync(runtime);
+
+}
+
+/**
+ * Deletes one Calendar event if it exists.
+ */
+function deleteCalendarEvent(runtime, task) {
+
+  if (!task.eventId) {
+    return;
+  }
+
+  try {
+
+    const event =
+      runtime.calendar.getEventById(task.eventId);
+
+    if (event) {
+
+      event.deleteEvent();
+
+      runtime.summary.deletedEvents++;
+
+      debugLog(
+        `Deleted Calendar event for ${task.taskId}.`
+      );
+
+    }
+
+  } catch (err) {
+
+    debugLog(
+      `Calendar event already missing for ${task.taskId}.`
+    );
+
+  }
+
+  // Always clear the Event ID from the sheet,
+  // whether the event existed or not.
+  queueTaskUpdates(
+
+    runtime,
+
+    task.row,
+
+    {
+
+      eventId: "",
+
+      syncedAt: new Date()
+
+    },
+
+    {
+
+      ...task,
+
+      eventId: ""
+
+    }
+
+  );
+
+}
+
+/**
+ * Finalizes Sheet → Calendar synchronization.
+ */
+function finalizeSheetSync(runtime) {
+
+  flushTaskUpdates(runtime);
+
+  repairPriorityFormulas(runtime);
+
+}
