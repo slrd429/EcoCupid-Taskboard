@@ -1,0 +1,297 @@
+// =========================================================================
+// 📢 DISCORD BROADCAST ENGINE (OPTIMIZED WITH ORIGINAL VISUAL FORMATTING)
+// =========================================================================
+
+function getDiscordIdMap() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const teamSheet = ss.getSheetByName(TEAM_SHEET_NAME);
+
+  if (!teamSheet) {
+    return { idMap: { "Sofia": "", "Vayla": "", "Pranav": "", "Bryan": "" }, sortedNames: ["Sofia", "Vayla", "Pranav", "Bryan"], trackedMessageIds: {}, memberRowMap: {} };
+  }
+
+  const data = teamSheet.getDataRange().getValues();
+  let tempArray = [];
+  let idMap = {};
+  let trackedMessageIds = {};
+  let memberRowMap = {};
+
+  for (let i = 1; i < data.length; i++) {
+    const name = data[i][0] ? data[i][0].toString().trim() : "";
+    const discordId = data[i][1] ? data[i][1].toString().trim() : "";
+    const sortVal = data[i][2] !== "" ? parseInt(data[i][2]) : 999;
+    const msgId = data[i][3] ? data[i][3].toString().trim() : "";
+
+    if (name !== "") {
+      idMap[name] = discordId;
+      trackedMessageIds[name] = msgId;
+      memberRowMap[name] = i + 1; // 1-indexed row position for updates
+      tempArray.push({ name: name, order: sortVal });
+    }
+  }
+
+  tempArray.sort((a, b) => a.order - b.order);
+  const sortedNames = tempArray.map(item => item.name);
+
+  return { idMap, sortedNames, trackedMessageIds, memberRowMap };
+}
+
+function sendWeeklySummaryByAssignee(forcedDelay) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName(SHEET_NAME);
+  const teamSheet = ss.getSheetByName(TEAM_SHEET_NAME);
+  if (!sheet || !teamSheet) return;
+
+  // Rule 1: The Single Read Rule (Load spreadsheet tasks into local runtime RAM)
+  const data = sheet.getDataRange().getValues();
+  
+  const teamData = getDiscordIdMap();
+  const discordIdMap = teamData.idMap;
+  const coreOrder = teamData.sortedNames;
+  const trackedMessageIds = teamData.trackedMessageIds;
+  const memberRowMap = teamData.memberRowMap;
+
+  // Clear hour markers for clean day-level evaluations (Prevents boundary drifting)
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const currentDayIndex = today.getDay();
+
+  let wednesday = new Date(today);
+  // Calculate backwards to the preceding Wednesday relative to current execution day
+  let distanceToWed = currentDayIndex >= 3 ? 3 - currentDayIndex : - (currentDayIndex + 4);
+  wednesday.setDate(today.getDate() + distanceToWed);
+  wednesday.setHours(0, 0, 0, 0);
+
+  let tuesday = new Date(wednesday);
+  tuesday.setDate(wednesday.getDate() + 6);
+  tuesday.setHours(23, 59, 59, 999);
+
+  const formatHeaderDate = (d) => Utilities.formatDate(d, Session.getScriptTimeZone(), "MM/dd");
+  const dateRangeStr = `${formatHeaderDate(wednesday)} - ${formatHeaderDate(tuesday)}`;
+
+  // Initialize structured data memory buckets per team member
+  let compiledAssigneeData = {};
+  coreOrder.forEach(member => {
+    compiledAssigneeData[member] = { overdueTasks: [], days: {} };
+  });
+  compiledAssigneeData["Unassigned"] = { overdueTasks: [], days: {} };
+
+  const getDayKey = (d) => Utilities.formatDate(d, Session.getScriptTimeZone(), "yyyy-MM-dd");
+
+  // Pre-populate daily sub-buckets for the 7-day tracking frame
+  for (let i = 0; i < 7; i++) {
+    let currentLoopDay = new Date(wednesday);
+    currentLoopDay.setDate(wednesday.getDate() + i);
+    let dayKey = getDayKey(currentLoopDay);
+
+    coreOrder.forEach(member => {
+      compiledAssigneeData[member].days[dayKey] = { dateObj: currentLoopDay, tasks: [] };
+    });
+    compiledAssigneeData["Unassigned"].days[dayKey] = { dateObj: currentLoopDay, tasks: [] };
+  }
+
+  // Rule 2: Zero-Cell Matrix Loop (Process task arrays completely in CPU memory memory)
+  for (let i = 1; i < data.length; i++) {
+    const row = data[i];
+    const task = buildTaskObject(row, i + 2);
+
+    const taskId = task.taskId;
+    const desc = task.description;
+    let assignee = task.assignee || "Unassigned";
+    const dueDateRaw = task.dueDate;
+    let status = task.status || STATUS.NOT_STARTED;
+
+    // Exclude tasks missing core attributes or explicitly marked as inactive/done
+    if (
+      !desc ||
+      !taskId ||
+      CLOSED_STATUSES.includes(status)
+    ) continue;
+
+    if (!compiledAssigneeData[assignee]) assignee = "Unassigned";
+
+    if (dueDateRaw instanceof Date) {
+      let compareDueDate = new Date(dueDateRaw);
+      compareDueDate.setHours(0, 0, 0, 0);
+
+      // Dynamic Overdue Evaluation logic fallback
+      if (
+        compareDueDate < today &&
+        !CLOSED_STATUSES.includes(status)
+      ) {
+        status = STATUS.OVERDUE;
+      }
+
+      // Ignore tasks scheduled past the current week's horizon
+      if (compareDueDate > tuesday) continue;
+
+      let taskDateKey = getDayKey(dueDateRaw);
+
+      if (compiledAssigneeData[assignee].days[taskDateKey]) {
+        compiledAssigneeData[assignee].days[taskDateKey].tasks.push({ desc, status });
+      } else if (compareDueDate < wednesday) {
+        compiledAssigneeData[assignee].overdueTasks.push({ desc, status, dateObj: dueDateRaw });
+      }
+    }
+  }
+
+  // Presentation priority map configurations
+  const statusPriority = {
+    [STATUS.OVERDUE]: 1,
+    [STATUS.IN_PROGRESS]: 2,
+    [STATUS.BLOCKED]: 3,
+    [STATUS.NOT_STARTED]: 4,
+    [STATUS.COMPLETED]: 5
+  };
+
+  // Reusable sub-engine formatting your specific visual markdown lines perfectly
+  const formatTaskLine = (t) => {
+    let squareEmoji = ":white_large_square:";
+    let displayDesc = t.desc;
+    const normalizedStatus =
+      (t.status || "").toString().trim().toLowerCase();
+    let displayStatus = t.status;
+
+    if (normalizedStatus === STATUS.OVERDUE.toLowerCase()) {
+      squareEmoji = ":red_square:";
+    } else if (normalizedStatus === STATUS.IN_PROGRESS.toLowerCase()) {
+      squareEmoji = ":yellow_square:";
+    } else if (normalizedStatus === STATUS.BLOCKED.toLowerCase()) {
+      squareEmoji = ":blue_square:";
+    } else if (
+      normalizedStatus === STATUS.COMPLETED.toLowerCase()
+    ) {
+      squareEmoji = ":white_check_mark:";
+      displayDesc = `~~${displayDesc}~~`;
+    }
+
+    return `> ${squareEmoji} | \`${displayStatus}\`: ${displayDesc}\n`;
+  };
+
+  // 3. GENERATE TARGET PAYLOAD BLOCKS AND POST TO DISCORD API
+  coreOrder.forEach((member, index) => {
+    let memberHasTasks = false;
+    let messageBody = "";
+
+    const discordId = discordIdMap[member];
+    const userMention = (discordId && discordId !== "") ? `<@${discordId}>` : `**${member}**`;
+
+    // Retained Custom Block Header Layout
+    messageBody += `\n_ _`;
+    messageBody += `\`\`\`${member}'s Tasks (${dateRangeStr})\`\`\`\n`;
+
+    // A. Historical Overdue block construction
+    if (compiledAssigneeData[member].overdueTasks.length > 0) {
+      memberHasTasks = true;
+      messageBody += `🚨 __**Overdue / Past Tasks**__\n`;
+      
+      compiledAssigneeData[member].overdueTasks.sort((a, b) => {
+        return (statusPriority[a.status] || 99) - (statusPriority[b.status] || 99);
+      });
+
+      compiledAssigneeData[member].overdueTasks.forEach(t => {
+        const pastDateStr = Utilities.formatDate(t.dateObj, Session.getScriptTimeZone(), "MM/dd");
+        let modifiedTask = { ...t, desc: `${t.desc} *(Due: ${pastDateStr})*` };
+        messageBody += formatTaskLine(modifiedTask);
+      });
+      messageBody += `\n`;
+    }
+
+    // B. Weekly Calendar day block construction
+    const structuralDays = Object.keys(compiledAssigneeData[member].days);
+    structuralDays.forEach(dayKey => {
+      const dayData = compiledAssigneeData[member].days[dayKey];
+      const dateObj = dayData.dateObj;
+
+      if (dayData.tasks.length > 0) {
+        memberHasTasks = true;
+
+        const monthName = Utilities.formatDate(dateObj, Session.getScriptTimeZone(), "MMMM");
+        const dayNum = Utilities.formatDate(dateObj, Session.getScriptTimeZone(), "d");
+        const dayOfWeek = Utilities.formatDate(dateObj, Session.getScriptTimeZone(), "EEEE");
+
+        messageBody += `__**${monthName} ${dayNum}** (*${dayOfWeek}*)__\n`;
+
+        dayData.tasks.sort((a, b) => {
+          return (statusPriority[a.status] || 99) - (statusPriority[b.status] || 99);
+        });
+
+        dayData.tasks.forEach(t => {
+          messageBody += formatTaskLine(t);
+        });
+        messageBody += `\n`;
+      }
+    });
+    
+    messageBody += `:mega: ${userMention} \n\n`;
+    
+    // Retained Blank Padding Segment
+    messageBody += `\n_ _`;
+
+    if (memberHasTasks) {
+      let existingMsgId = trackedMessageIds[member] || "";
+      let baseWebhookUrl = DISCORD_WEBHOOK_URL.split('?')[0]; // Wipes out any trailing query string parameters safely
+      let targetUrl = baseWebhookUrl;
+      let executionModeEdit = false;
+
+      if (existingMsgId !== "") {
+        // Correctly format the URL path for an update patch request
+        targetUrl = `${baseWebhookUrl}/messages/${existingMsgId}`;
+        executionModeEdit = true;
+      } else {
+        // Appends wait parameter ONLY when publishing a fresh message to safely grab its tracking ID
+        targetUrl = `${baseWebhookUrl}?wait=true`;
+      }
+
+      let options = {
+        method: executionModeEdit ? "patch" : "post",
+        contentType: "application/json",
+        payload: JSON.stringify({ content: messageBody }),
+        muteHttpExceptions: true
+      };
+
+      try {
+        console.log(`Sending update for ${member}...`);
+
+        let response = UrlFetchApp.fetch(targetUrl, options);
+
+        console.log(
+          `Finished ${member}: ${response.getResponseCode()}`
+        );
+
+        // Track response ID on an initial post to allow future overrides
+        if (!executionModeEdit && response.getResponseCode() >= 200 && response.getResponseCode() < 300) {
+          let responseText = response.getContentText();
+          if (responseText) {
+            let respData = JSON.parse(responseText);
+            // Securely check if respData and respData.id exist
+            if (respData && respData.id) {
+              let currentRow = memberRowMap[member];
+              if (currentRow) {
+                teamSheet.getRange(currentRow, 4).setValue(respData.id.toString());
+              }
+            }
+          }
+        }
+      } catch(err) {
+        console.error(`Transmission fault encountered on individual ${member}: ${err}`);
+      }
+
+      // Discord webhook rate-limit protection
+      if (index < coreOrder.length - 1) {
+
+        // Discord webhooks allow multiple edits per second.
+        // We only pause briefly to avoid burst limits.
+        let sleepTime =
+          (typeof forcedDelay === "number")
+            ? forcedDelay
+            : 1500;
+
+        Utilities.sleep(
+          Math.max(0, sleepTime)
+        );
+
+      }
+    }
+  });
+}
