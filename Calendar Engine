@@ -1,0 +1,405 @@
+// =========================================================================
+// 🌱 EcoCupid Taskboard Sync
+//
+// File: CalendarEngine.gs
+// Version: 2.0.0
+// Last Updated: 2026-07-03
+//
+// Unit 1
+// Calendar Helpers
+// =========================================================================
+
+/**
+ * Returns the configured Google Calendar.
+ */
+function getTaskCalendar() {
+
+  const calendar =
+    CalendarApp.getCalendarById(CALENDAR_ID);
+
+  if (!calendar) {
+
+    throw new Error(
+      "Unable to open the configured calendar."
+    );
+
+  }
+
+  return calendar;
+
+}
+
+/**
+ * Looks up a Calendar event by ID.
+ *
+ * Returns null if the event no longer exists.
+ */
+function findCalendarEvent(eventId) {
+
+  if (!eventId) {
+    return null;
+  }
+
+  try {
+
+    return getTaskCalendar()
+      .getEventById(eventId);
+
+  } catch (err) {
+
+    return null;
+
+  }
+
+}
+
+/**
+ * Returns all events within the configured sync window.
+ */
+function getCalendarEvents() {
+
+  const today = new Date();
+
+  const start =
+    new Date(today);
+
+  start.setDate(
+    start.getDate() - SYNC_LOOKBACK_DAYS
+  );
+
+  const end =
+    new Date(today);
+
+  end.setDate(
+    end.getDate() + SYNC_LOOKAHEAD_DAYS
+  );
+
+  return getTaskCalendar()
+    .getEvents(start, end);
+
+}
+
+// =========================================================================
+// Unit 2
+// Calendar CRUD
+// =========================================================================
+
+/**
+ * Creates a new Calendar event from a task.
+ *
+ * @param {Object} task Normalized task object
+ * @returns {CalendarEvent}
+ */
+function calendarCreateEvent(task) {
+
+  const event =
+    getTaskCalendar().createAllDayEvent(
+
+      buildCalendarTitle(task),
+
+      new Date(task.dueDate)
+
+    );
+
+  applyCalendarFormatting(
+    event,
+    task
+  );
+
+  setEventReminders(
+    event,
+    task.reminderDays
+  );
+
+  return event;
+
+}
+
+/**
+ * Updates an existing Calendar event.
+ *
+ * Returns the updated event,
+ * or null if the Event ID is invalid.
+ *
+ * @param {Object} task Normalized task object
+ */
+function calendarUpdateEvent(task) {
+
+  const event =
+    findCalendarEvent(task.eventId);
+
+  if (!event) {
+    return null;
+  }
+
+  event.setAllDayDate(
+    new Date(task.dueDate)
+  );
+
+  applyCalendarFormatting(
+    event,
+    task
+  );
+
+  setEventReminders(
+    event,
+    task.reminderDays
+  );
+
+  return event;
+
+}
+
+/**
+ * Deletes a Calendar event.
+ *
+ * Returns true if deleted.
+ * Returns false if already missing.
+ *
+ * @param {String} eventId
+ */
+function calendarDeleteEvent(eventId) {
+
+  const event =
+    findCalendarEvent(eventId);
+
+  if (!event) {
+    return false;
+  }
+
+  event.deleteEvent();
+
+  return true;
+
+}
+
+// =========================================================================
+// Unit 3
+// Reminder Management
+// =========================================================================
+
+/**
+ * Applies the configured popup reminder.
+ *
+ * Google Apps Script does not provide a way to
+ * remove existing popup reminders from events.
+ *
+ * Therefore reminders are only added when a task
+ * specifies a valid reminder value.
+ */
+function setEventReminders(event, reminderDays) {
+
+  if (!event) {
+    return;
+  }
+
+  const days =
+    parseReminderDays(reminderDays);
+
+  if (days === null) {
+    return;
+  }
+
+  const minutes =
+    days * 24 * 60;
+
+  const existing =
+    event.getPopupReminders();
+
+  if (
+
+    existing.includes(minutes)
+
+  ) {
+
+    return;
+
+  }
+
+  event.addPopupReminder(
+    minutes
+  );
+
+}
+
+/**
+ * Converts the sheet value into a valid reminder.
+ *
+ * Returns:
+ *   Number -> valid reminder days
+ *   null   -> no reminder
+ */
+function parseReminderDays(value) {
+
+  if (
+
+    value === "" ||
+
+    value === null ||
+
+    value === undefined
+
+  ) {
+
+    return null;
+
+  }
+
+  const days =
+    Number(value);
+
+  if (
+
+    Number.isNaN(days) ||
+
+    days <= 0
+
+  ) {
+
+    return null;
+
+  }
+
+  return Math.floor(days);
+
+}
+
+// =========================================================================
+// Unit 4
+// Event Formatting
+// =========================================================================
+
+/**
+ * Builds the Calendar event title.
+ *
+ * Format:
+ * [Assignee] Task Description
+ */
+/**
+ * Builds the Calendar event title.
+ *
+ * Format:
+ * 🚨 Overdue | [Assignee] Task
+ * 🛑 Blocked | [Assignee] Task
+ * [Assignee] Task
+ */
+function buildCalendarTitle(task) {
+
+  let prefix = "";
+
+  const status =
+    normalizeString(task.status);
+
+  if (status === STATUS.BLOCKED) {
+
+    prefix = "🛑 Blocked | ";
+
+  } else if (
+
+    !isClosedTask(task) &&
+    task.dueDate instanceof Date
+
+  ) {
+
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    const due =
+      new Date(task.dueDate);
+    due.setHours(0, 0, 0, 0);
+
+    if (due < today) {
+
+      prefix = "🚨 Overdue | ";
+
+    }
+
+  }
+
+  const assignee =
+    normalizeString(task.assignee) ||
+    "Unassigned";
+
+  const description =
+    normalizeString(task.description);
+
+  return `${prefix}[${assignee}] ${description}`;
+
+}
+
+/**
+ * Builds the Calendar event description.
+ *
+ * Keeps useful metadata visible directly inside
+ * Google Calendar.
+ */
+function buildCalendarDescription(task) {
+
+  const lines = [];
+
+  lines.push(
+    `Task ID: ${task.taskId || "-"}`
+  );
+
+  lines.push(
+    `Assignee: ${task.assignee || "-"}`
+  );
+
+  lines.push(
+    `Status: ${task.status || "-"}`
+  );
+
+  if (task.notes) {
+
+    lines.push("");
+
+    lines.push("Notes:");
+
+    lines.push(task.notes);
+
+  }
+
+  return lines.join("\n");
+
+}
+
+function applyCalendarFormatting(event, task) {
+
+  if (!event) {
+    return;
+  }
+
+  event.setTitle(
+    buildCalendarTitle(task)
+  );
+
+  event.setDescription(
+    buildCalendarDescription(task)
+  );
+
+}
+
+/**
+ * Returns the comparable state of a Calendar event.
+ *
+ * Only fields that actually exist in Calendar
+ * are included.
+ */
+function getCalendarState(event) {
+
+  return {
+
+    dueDate:
+      Utilities.formatDate(
+
+        event.getAllDayStartDate(),
+
+        Session.getScriptTimeZone(),
+
+        "yyyy-MM-dd"
+
+      )
+
+  };
+
+}
