@@ -1,0 +1,1410 @@
+// =========================================================================
+// 🌱 EcoCupid Taskboard Sync
+//
+// File: Diagnostics.gs
+// Version: 2.0.0
+// Last Updated: 2026-07-03
+//
+// Unit 1
+// System Health Check
+// =========================================================================
+
+/**
+ * Runs the complete system health check.
+ *
+ * Returns an object describing the current
+ * health of the EcoCupid synchronization system.
+ */
+function runHealthCheck() {
+
+  const report = {
+
+    passed: true,
+
+    checks: [],
+
+    warnings: [],
+
+    errors: []
+
+  };
+
+  checkSpreadsheet(report);
+
+  checkCalendar(report);
+
+  checkConfig(report);
+
+  checkTemplateRow(report);
+
+  checkColumns(report);
+
+  report.passed =
+    report.errors.length === 0;
+
+  return report;
+
+}
+
+/**
+ * Runs the health check and writes the
+ * results to the execution log.
+ */
+function showHealthCheck() {
+
+  const report =
+    runHealthCheck();
+
+  const lines = [];
+
+  lines.push(
+    "========== EcoCupid System Health =========="
+  );
+
+  lines.push("");
+
+  report.checks.forEach(check => {
+
+    lines.push(
+      "🟢 " + check
+    );
+
+  });
+
+  report.warnings.forEach(warning => {
+
+    lines.push(
+      "🟡 " + warning
+    );
+
+  });
+
+  report.errors.forEach(error => {
+
+    lines.push(
+      "🔴 " + error
+    );
+
+  });
+
+  lines.push("");
+
+  lines.push(
+    report.passed
+      ? "Overall Status: HEALTHY ✅"
+      : "Overall Status: FAILED ❌"
+  );
+
+  Logger.log(
+    lines.join("\n")
+  );
+
+  return report;
+
+}
+
+/**
+ * Verifies that the required spreadsheet
+ * sheets exist.
+ */
+function checkSpreadsheet(report) {
+
+  const ss =
+    SpreadsheetApp.getActiveSpreadsheet();
+
+  const tasks =
+    ss.getSheetByName(SHEET_NAME);
+
+  const team =
+    ss.getSheetByName(TEAM_SHEET_NAME);
+
+  if (tasks) {
+
+    report.checks.push(
+      `Tasks sheet found (${SHEET_NAME})`
+    );
+
+  } else {
+
+    report.errors.push(
+      `Missing Tasks sheet (${SHEET_NAME})`
+    );
+
+  }
+
+  if (team) {
+
+    report.checks.push(
+      `Team sheet found (${TEAM_SHEET_NAME})`
+    );
+
+  } else {
+
+    report.errors.push(
+      `Missing Team sheet (${TEAM_SHEET_NAME})`
+    );
+
+  }
+
+}
+
+/**
+ * Verifies that the configured calendar
+ * can be opened.
+ */
+function checkCalendar(report) {
+
+  try {
+
+    const calendar =
+      getTaskCalendar();
+
+    report.checks.push(
+      `Calendar connected (${calendar.getName()})`
+    );
+
+  } catch (err) {
+
+    report.errors.push(
+      "Unable to open configured Calendar."
+    );
+
+  }
+
+}
+
+/**
+ * Verifies that the configuration values
+ * are present.
+ */
+function checkConfig(report) {
+
+  if (!CALENDAR_ID) {
+
+    report.errors.push(
+      "CALENDAR_ID missing."
+    );
+
+  }
+
+  if (!SHEET_NAME) {
+
+    report.errors.push(
+      "SHEET_NAME missing."
+    );
+
+  }
+
+  if (!TEAM_SHEET_NAME) {
+
+    report.errors.push(
+      "TEAM_SHEET_NAME missing."
+    );
+
+  }
+
+  if (
+    typeof NUM_COLUMNS === "undefined" ||
+    NUM_COLUMNS <= 0
+  ) {
+
+    report.errors.push(
+      "NUM_COLUMNS invalid."
+    );
+
+  }
+
+  if (report.errors.length === 0) {
+
+    report.checks.push(
+      "Configuration loaded."
+    );
+
+  }
+
+}
+
+/**
+ * Ensures the template row exists.
+ */
+function checkTemplateRow(report) {
+
+  const sheet =
+    SpreadsheetApp
+      .getActiveSpreadsheet()
+      .getSheetByName(SHEET_NAME);
+
+  if (!sheet) return;
+
+  if (
+    sheet.getLastRow() < TEMPLATE_ROW
+  ) {
+
+    report.errors.push(
+      `Template row ${TEMPLATE_ROW} not found.`
+    );
+
+    return;
+
+  }
+
+  report.checks.push(
+    `Template row ${TEMPLATE_ROW} found.`
+  );
+
+}
+
+/**
+ * Verifies the sheet contains enough columns
+ * for the configured schema.
+ */
+function checkColumns(report) {
+
+  const sheet =
+    SpreadsheetApp
+      .getActiveSpreadsheet()
+      .getSheetByName(SHEET_NAME);
+
+  if (!sheet) return;
+
+  const columns =
+    sheet.getLastColumn();
+
+  if (
+    columns < NUM_COLUMNS
+  ) {
+
+    report.errors.push(
+      `Sheet has ${columns} columns but ${NUM_COLUMNS} expected.`
+    );
+
+    return;
+
+  }
+
+  report.checks.push(
+    `${columns} columns detected.`
+  );
+
+}
+
+// =========================================================================
+// Unit 2
+// Duplicate Detection
+// =========================================================================
+
+/**
+ * Runs all duplicate detection diagnostics.
+ */
+function runDuplicateCheck() {
+
+  const report = {
+
+    duplicateTaskIds: [],
+
+    duplicateEventIds: [],
+
+    blankTaskIds: [],
+
+    blankEventIds: [],
+
+    orphanCalendarEvents: []
+
+  };
+
+  findSheetDuplicates(report);
+
+  findCalendarOrphans(report);
+
+  logDuplicateReport(report);
+
+  return report;
+
+}
+
+/**
+ * Logs the duplicate detection report.
+ */
+function logDuplicateReport(report) {
+
+  Logger.log(
+    "========== Duplicate Detection =========="
+  );
+
+  Logger.log(
+    "Duplicate Task IDs: " +
+    report.duplicateTaskIds.length
+  );
+
+  Logger.log(
+    "Duplicate Event IDs: " +
+    report.duplicateEventIds.length
+  );
+
+  Logger.log(
+    "Blank Task IDs: " +
+    report.blankTaskIds.length
+  );
+
+  Logger.log(
+    "Blank Event IDs: " +
+    report.blankEventIds.length
+  );
+
+  Logger.log(
+    "Orphan Calendar Events: " +
+    report.orphanCalendarEvents.length
+  );
+
+  Logger.log(
+    "========================================="
+  );
+
+}
+
+/**
+ * Detects duplicate Task IDs and Event IDs
+ * within the spreadsheet.
+ *
+ * Only reports missing Event IDs for
+ * active tasks that should be synchronized.
+ */
+function findSheetDuplicates(report) {
+
+  const sheet =
+    SpreadsheetApp
+      .getActiveSpreadsheet()
+      .getSheetByName(SHEET_NAME);
+
+  const lastRow =
+    sheet.getLastRow();
+
+  if (lastRow <= 1) return;
+
+  const rows =
+    sheet
+      .getRange(
+        2,
+        1,
+        lastRow - 1,
+        NUM_COLUMNS
+      )
+      .getValues();
+
+  const taskIds = new Map();
+  const eventIds = new Map();
+
+  rows.forEach((row, index) => {
+
+    const rowNumber = index + 2;
+
+    const task =
+      buildTaskObject(
+        row,
+        rowNumber
+      );
+
+    const hasContent =
+      task.description !== "" ||
+      task.dueDate;
+
+    if (!hasContent) return;
+
+    // ----------------------------
+    // Task ID
+    // ----------------------------
+
+    if (task.taskId === "") {
+
+      report.blankTaskIds.push(
+        rowNumber
+      );
+
+    } else {
+
+      if (!taskIds.has(task.taskId)) {
+
+        taskIds.set(
+          task.taskId,
+          []
+        );
+
+      }
+
+      taskIds
+        .get(task.taskId)
+        .push(rowNumber);
+
+    }
+
+    // ----------------------------
+    // Event ID
+    // ----------------------------
+
+    const shouldHaveEvent =
+
+      task.dueDate &&
+
+      !CLOSED_STATUSES.includes(
+        task.status
+      );
+
+    if (shouldHaveEvent) {
+
+      if (task.eventId === "") {
+
+        report.blankEventIds.push(
+          rowNumber
+        );
+
+      } else {
+
+        if (!eventIds.has(task.eventId)) {
+
+          eventIds.set(
+            task.eventId,
+            []
+          );
+
+        }
+
+        eventIds
+          .get(task.eventId)
+          .push(rowNumber);
+
+      }
+
+    }
+
+  });
+
+  taskIds.forEach((rows, id) => {
+
+    if (rows.length > 1) {
+
+      report.duplicateTaskIds.push({
+
+        id,
+
+        rows
+
+      });
+
+    }
+
+  });
+
+  eventIds.forEach((rows, id) => {
+
+    if (rows.length > 1) {
+
+      report.duplicateEventIds.push({
+
+        id,
+
+        rows
+
+      });
+
+    }
+
+  });
+
+}
+
+/**
+ * Detects EcoCupid Calendar events that are
+ * no longer linked to a spreadsheet task.
+ */
+function findCalendarOrphans(report) {
+
+  const sheet =
+    SpreadsheetApp
+      .getActiveSpreadsheet()
+      .getSheetByName(SHEET_NAME);
+
+  const lastRow =
+    sheet.getLastRow();
+
+  const sheetEventIds =
+    new Set();
+
+  if (lastRow > 1) {
+
+    sheet
+      .getRange(
+        2,
+        COL.EVENT_ID + 1,
+        lastRow - 1,
+        1
+      )
+      .getValues()
+      .flat()
+      .forEach(id => {
+
+        id =
+          normalizeString(id);
+
+        if (id !== "") {
+
+          sheetEventIds.add(id);
+
+        }
+
+      });
+
+  }
+
+  const events =
+    getCalendarEvents();
+
+  events.forEach(event => {
+
+    const id =
+      event.getId();
+
+    // Ignore manually-created calendar events.
+    if (
+      !event
+        .getDescription()
+        .includes("Task ID:")
+    ) {
+
+      return;
+
+    }
+
+    if (!sheetEventIds.has(id)) {
+
+      report.orphanCalendarEvents.push({
+
+        id,
+
+        title:
+          event.getTitle(),
+
+        date:
+          event.getAllDayStartDate()
+
+      });
+
+    }
+
+  });
+
+}
+
+// =========================================================================
+// Unit 3
+// Sync Integrity Audit
+// =========================================================================
+
+/**
+ * Audits synchronization integrity between
+ * the spreadsheet and Google Calendar.
+ */
+function runIntegrityAudit() {
+
+  const report = {
+
+    checked: 0,
+
+    missingCalendarEvents: [],
+
+    dateMismatches: []
+
+  };
+
+  auditCalendarIntegrity(report);
+
+  logIntegrityReport(report);
+
+  return report;
+
+}
+
+/**
+ * Logs the integrity audit summary.
+ */
+function logIntegrityReport(report) {
+
+  Logger.log(
+    "========== Sync Integrity Audit =========="
+  );
+
+  Logger.log(
+    "Tasks Checked: " +
+    report.checked
+  );
+
+  Logger.log(
+    "Missing Calendar Events: " +
+    report.missingCalendarEvents.length
+  );
+
+  if (report.missingCalendarEvents.length > 0) {
+
+    Logger.log("");
+
+    Logger.log("Affected Tasks:");
+
+    report.missingCalendarEvents.forEach(item => {
+
+      Logger.log(
+        `• Row ${item.row} | ${item.taskId} | ${item.description}`
+      );
+
+    });
+
+  }
+
+  Logger.log(
+    "Date Mismatches: " +
+    report.dateMismatches.length
+  );
+
+  if (report.dateMismatches.length > 0) {
+
+    Logger.log("");
+
+    Logger.log("Affected Tasks:");
+
+    report.dateMismatches.forEach(item => {
+
+      Logger.log(
+        `• Row ${item.row} | ${item.taskId}`
+      );
+
+      Logger.log(
+        `    Sheet: ${item.sheetDate}`
+      );
+
+      Logger.log(
+        `    Calendar: ${item.calendarDate}`
+      );
+
+    });
+
+  }
+
+  Logger.log(
+    "=========================================="
+  );
+
+}
+
+/**
+ * Audits every active synchronized task.
+ */
+function auditCalendarIntegrity(report) {
+
+  const sheet =
+    SpreadsheetApp
+      .getActiveSpreadsheet()
+      .getSheetByName(SHEET_NAME);
+
+  const lastRow =
+    sheet.getLastRow();
+
+  if (lastRow <= 1) return;
+
+  const rows =
+    sheet
+      .getRange(
+        2,
+        1,
+        lastRow - 1,
+        NUM_COLUMNS
+      )
+      .getValues();
+
+  const eventMap =
+    buildCalendarEventMap();
+
+  rows.forEach((row, index) => {
+
+    const task =
+      buildTaskObject(
+        row,
+        index + 2
+      );
+
+    if (
+
+      task.eventId === "" ||
+
+      CLOSED_STATUSES.includes(
+        task.status
+      )
+
+    ) {
+
+      return;
+
+    }
+
+    report.checked++;
+
+    auditSingleTask(
+      task,
+      eventMap,
+      report
+    );
+
+  });
+
+}
+
+/**
+ * Audits one task using the cached
+ * Calendar event map.
+ */
+function auditSingleTask(
+  task,
+  eventMap,
+  report
+) {
+
+  const event =
+    eventMap.get(
+      task.eventId
+    );
+
+  if (!event) {
+
+    report.missingCalendarEvents.push({
+
+      row: task.row,
+
+      taskId: task.taskId,
+
+      description: task.description,
+
+      eventId: task.eventId
+
+    });
+
+    return;
+
+  }
+
+  if (!task.dueDate) {
+
+    return;
+
+  }
+
+  const sheetDate =
+    Utilities.formatDate(
+
+      new Date(task.dueDate),
+
+      Session.getScriptTimeZone(),
+
+      "yyyyMMdd"
+
+    );
+
+  const calendarDate =
+    Utilities.formatDate(
+
+      event.getAllDayStartDate(),
+
+      Session.getScriptTimeZone(),
+
+      "yyyyMMdd"
+
+    );
+
+  if (
+
+    sheetDate !==
+    calendarDate
+
+  ) {
+
+    report.dateMismatches.push({
+
+      row: task.row,
+
+      taskId: task.taskId,
+
+      description: task.description,
+
+      eventId: task.eventId,
+
+      sheetDate,
+
+      calendarDate
+
+    });
+
+  }
+
+}
+
+/**
+ * Builds a lookup map of
+ * Event ID → Calendar Event.
+ */
+function buildCalendarEventMap() {
+
+  const map =
+    new Map();
+
+  const events =
+    getCalendarEvents();
+
+  events.forEach(event => {
+
+    map.set(
+
+      event.getId(),
+
+      event
+
+    );
+
+  });
+
+  return map;
+
+}
+
+// =========================================================================
+// Unit 4
+// Repair Advisor
+// =========================================================================
+
+/**
+ * Scans the taskboard for issues that can
+ * be repaired automatically.
+ */
+function runRepairAdvisor() {
+
+  const report = {
+
+    missingEventIds: [],
+
+    invalidEventIds: [],
+
+    missingTaskIds: [],
+
+    missingDueDates: [],
+
+    actions: {
+
+      createCalendarEvents: [],
+
+      recreateCalendarEvents: [],
+
+      generateTaskIds: [],
+
+      manualReview: []
+
+    },
+
+    repairable: 0
+
+  };
+
+  findRepairCandidates(report);
+
+  logRepairReport(report);
+
+  return report;
+
+}
+
+/**
+ * Logs the repair summary.
+ */
+function logRepairReport(report) {
+
+  Logger.log(
+    "========== Repair Advisor =========="
+  );
+
+  Logger.log(
+    "Missing Event IDs: " +
+    report.missingEventIds.length
+  );
+
+  if (report.missingEventIds.length > 0) {
+
+    Logger.log("");
+    Logger.log("Tasks Missing Calendar Events:");
+
+    report.missingEventIds.forEach(item => {
+
+      Logger.log(
+        `• Row ${item.row} | ${item.taskId} | ${item.description}`
+      );
+
+    });
+
+  }
+
+  Logger.log(
+    "Invalid Event IDs: " +
+    report.invalidEventIds.length
+  );
+
+  if (report.invalidEventIds.length > 0) {
+
+    Logger.log("");
+    Logger.log("Tasks with Invalid Event IDs:");
+
+    report.invalidEventIds.forEach(item => {
+
+      Logger.log(
+        `• Row ${item.row} | ${item.taskId} | ${item.description}`
+      );
+
+    });
+
+  }
+
+  Logger.log(
+    "Missing Task IDs: " +
+    report.missingTaskIds.length
+  );
+
+  if (report.missingTaskIds.length > 0) {
+
+    Logger.log("");
+    Logger.log("Tasks Missing Task IDs:");
+
+    report.missingTaskIds.forEach(item => {
+
+      Logger.log(
+        `• Row ${item.row} | ${item.description}`
+      );
+
+    });
+
+  }
+
+  Logger.log(
+    "Missing Due Dates: " +
+    report.missingDueDates.length
+  );
+
+  if (report.missingDueDates.length > 0) {
+
+    Logger.log("");
+    Logger.log("Tasks Missing Due Dates:");
+
+    report.missingDueDates.forEach(item => {
+
+      Logger.log(
+        `• Row ${item.row} | ${item.taskId} | ${item.description}`
+      );
+
+    });
+
+  }
+
+  Logger.log("");
+
+  Logger.log(
+    "Suggested Repairs"
+  );
+
+  Logger.log(
+    "• Create Calendar Events: " +
+    report.actions.createCalendarEvents.length
+  );
+
+  Logger.log(
+    "• Recreate Calendar Events: " +
+    report.actions.recreateCalendarEvents.length
+  );
+
+  Logger.log(
+    "• Generate Task IDs: " +
+    report.actions.generateTaskIds.length
+  );
+
+  Logger.log(
+    "• Manual Review: " +
+    report.actions.manualReview.length
+  );
+
+  Logger.log("");
+
+  Logger.log(
+    "Repairable Items: " +
+    report.repairable
+  );
+
+  Logger.log(
+    "===================================="
+  );
+
+}
+
+/**
+ * Finds rows that could be repaired.
+ */
+function findRepairCandidates(report) {
+
+  const sheet =
+    SpreadsheetApp
+      .getActiveSpreadsheet()
+      .getSheetByName(SHEET_NAME);
+
+  const lastRow =
+    sheet.getLastRow();
+
+  if (lastRow <= 1) return;
+
+  const rows =
+    sheet
+      .getRange(
+        2,
+        1,
+        lastRow - 1,
+        NUM_COLUMNS
+      )
+      .getValues();
+
+  const eventMap =
+    buildCalendarEventMap();
+
+  rows.forEach((row, index) => {
+
+    const task =
+      buildTaskObject(
+        row,
+        index + 2
+      );
+
+    if (isEmptyTask(task)) {
+
+      return;
+
+    }
+
+    evaluateRepairCandidate(
+      task,
+      eventMap,
+      report
+    );
+
+  });
+
+}
+
+/**
+ * Evaluates one task for repair opportunities.
+ */
+function evaluateRepairCandidate(
+  task,
+  eventMap,
+  report
+) {
+
+  const taskInfo = {
+
+    row: task.row,
+
+    taskId: task.taskId,
+
+    description: task.description,
+
+    eventId: task.eventId
+
+  };
+
+  if (task.taskId === "") {
+
+    report.missingTaskIds.push(taskInfo);
+
+    report.actions.generateTaskIds.push(taskInfo);
+
+    report.repairable++;
+
+  }
+
+  if (
+    task.description !== "" &&
+    !task.dueDate
+  ) {
+
+    report.missingDueDates.push(taskInfo);
+
+    report.actions.manualReview.push(taskInfo);
+
+  }
+
+  if (
+    isClosedTask(task)
+  ) {
+
+    return;
+
+  }
+
+  if (
+    task.eventId === ""
+  ) {
+
+    report.missingEventIds.push(taskInfo);
+
+    report.actions.createCalendarEvents.push(taskInfo);
+
+    report.repairable++;
+
+    return;
+
+  }
+
+  if (
+    !eventMap.has(task.eventId)
+  ) {
+
+    report.invalidEventIds.push(taskInfo);
+
+    report.actions.recreateCalendarEvents.push(taskInfo);
+
+    report.repairable++;
+
+  }
+
+}
+
+// =========================================================================
+// Unit 5
+// System Status Report
+// =========================================================================
+
+/**
+ * Runs every diagnostic module and
+ * displays an overall system status.
+ */
+function runSystemReport() {
+
+  const health =
+    runHealthCheck();
+
+  const duplicates =
+    runDuplicateCheck();
+
+  const integrity =
+    runIntegrityAudit();
+
+  const repairs =
+    runRepairAdvisor();
+
+  const status =
+    buildSystemStatus(
+
+      health,
+
+      duplicates,
+
+      integrity,
+
+      repairs
+
+    );
+
+  logSystemReport(status);
+
+  return status;
+
+}
+
+/**
+ * Combines all diagnostic reports into
+ * one overall system report.
+ */
+function buildSystemStatus(
+
+  health,
+
+  duplicates,
+
+  integrity,
+
+  repairs
+
+) {
+
+  const healthy =
+
+    health.errors.length === 0 &&
+
+    duplicates.duplicateTaskIds.length === 0 &&
+
+    duplicates.duplicateEventIds.length === 0 &&
+
+    duplicates.blankTaskIds.length === 0 &&
+
+    duplicates.blankEventIds.length === 0 &&
+
+    duplicates.orphanCalendarEvents.length === 0 &&
+
+    integrity.missingCalendarEvents.length === 0 &&
+
+    integrity.dateMismatches.length === 0 &&
+
+    repairs.repairable === 0;
+
+  return {
+
+    timestamp:
+
+      new Date(),
+
+    version:
+
+      SYSTEM_VERSION,
+
+    healthy,
+
+    health,
+
+    duplicates,
+
+    integrity,
+
+    repairs
+
+  };
+
+}
+
+/**
+ * Formats a PASS / FAIL status.
+ */
+function formatStatus(pass) {
+
+  return pass
+
+    ? "PASS ✅"
+
+    : "FAIL ❌";
+
+}
+
+/**
+ * Logs the complete system report.
+ */
+function logSystemReport(report) {
+
+  Logger.log("");
+
+  Logger.log(
+    "=========================================="
+  );
+
+  Logger.log(
+    "EcoCupid Taskboard Sync v" +
+    report.version
+  );
+
+  Logger.log("");
+
+  Logger.log(
+  "Health Check ........ " +
+
+  formatStatus(
+
+    report.health.errors.length === 0
+
+  )
+
+  );
+
+  Logger.log(
+  "Duplicate Check ..... " +
+
+  formatStatus(
+
+    report.duplicates.duplicateTaskIds.length === 0 &&
+
+    report.duplicates.duplicateEventIds.length === 0 &&
+
+    report.duplicates.orphanCalendarEvents.length === 0
+
+  )
+
+  );
+
+  Logger.log(
+  "Integrity Audit ..... " +
+
+  formatStatus(
+
+    report.integrity.missingCalendarEvents.length === 0 &&
+
+    report.integrity.dateMismatches.length === 0
+
+  )
+
+  );
+
+  Logger.log(
+  "Repair Advisor ...... " +
+
+  formatStatus(
+
+    report.repairs.repairable === 0
+
+  )
+
+  );
+
+  Logger.log("");
+
+  Logger.log(
+    "Overall Status"
+  );
+
+  Logger.log("");
+
+  Logger.log(
+
+    report.healthy
+
+      ? "🟢 PRODUCTION READY"
+
+      : "🔴 ATTENTION REQUIRED"
+
+  );
+
+  Logger.log("");
+
+  Logger.log(
+    "Generated: " +
+    Utilities.formatDate(
+
+      report.timestamp,
+
+      Session.getScriptTimeZone(),
+
+      "yyyy-MM-dd HH:mm:ss"
+
+    )
+
+  );
+
+  Logger.log(
+    "=========================================="
+  );
+
+}
+
+function debugLastRow() {
+
+  const sheet =
+    SpreadsheetApp.getActiveSpreadsheet()
+      .getSheetByName("Tasks");
+
+  Logger.log(
+    "Last Row: " + sheet.getLastRow()
+  );
+
+}
