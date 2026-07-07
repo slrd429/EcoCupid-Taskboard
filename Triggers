@@ -1,0 +1,194 @@
+// =========================================================================
+// 🚀 EcoCupid Taskboard Sync v2.0.0
+// Triggers & User Interface
+// =========================================================================
+
+/**
+ * Creates the custom spreadsheet menu.
+ */
+function onOpen() {
+
+  SpreadsheetApp.getUi()
+    .createMenu("🚀 EcoCupid")
+    .addItem("🔄 Synchronize Tasks", "manualSync")
+    .addSeparator()
+    .addItem("📢 Update Discord Task Board", "manualDiscordBroadcast")
+    .addItem("🧪 Update Sandbox Task Board", "manualDiscordTestButton")
+    .addToUi();
+
+}
+
+/**
+ * Automatically initializes newly-created manual tasks.
+ *
+ * Fires whenever a Description is entered into a blank task row.
+ *
+ * Sets:
+ * • Task ID
+ * • Created At
+ * • Created Source
+ * • Default Status
+ *
+ * Does NOT:
+ * • Create Calendar Events
+ * • Update Synced At
+ * • Modify Event IDs
+ */
+function onEdit(e) {
+
+  if (!e) return;
+
+  const range = e.range;
+  const sheet = range.getSheet();
+
+  if (sheet.getName() !== SHEET_NAME) return;
+
+  const row = range.getRow();
+  const col = range.getColumn();
+
+  if (row <= 1) return;
+
+  const descriptionCol = COL.DESCRIPTION + 1;
+
+  if (col !== descriptionCol) return;
+
+  const description =
+    sheet
+      .getRange(row, descriptionCol)
+      .getValue()
+      .toString()
+      .trim();
+
+  if (description === "") return;
+
+  const taskIdCell =
+    sheet.getRange(row, COL.TASK_ID + 1);
+
+  const statusCell =
+    sheet.getRange(row, COL.STATUS + 1);
+
+  const createdAtCell =
+    sheet.getRange(row, COL.CREATED_AT + 1);
+
+  const createdSourceCell =
+    sheet.getRange(row, COL.CREATED_SOURCE + 1);
+
+  if (taskIdCell.getValue().toString().trim() === "") {
+    taskIdCell.setValue(generateTaskId());
+  }
+
+  if (statusCell.getValue().toString().trim() === "") {
+    statusCell.setValue(STATUS.NOT_STARTED);
+  }
+
+  if (!createdAtCell.getValue()) {
+    createdAtCell.setValue(new Date());
+  }
+
+  if (createdSourceCell.getValue().toString().trim() === "") {
+    createdSourceCell.setValue(CREATED_SOURCE.MANUAL);
+  }
+
+}
+
+/**
+ * Manual synchronization.
+ */
+function manualSync() {
+
+  runSync(true);
+
+  SpreadsheetApp
+    .getUi()
+    .alert(
+      "✅ Synchronization Complete",
+      "Your task board and Google Calendar have been synchronized successfully.",
+      SpreadsheetApp.getUi().ButtonSet.OK
+    );
+
+}
+
+/**
+ * Midnight scheduled trigger.
+ */
+function scheduledMidnightSync() {
+
+  runSync(false);
+
+  // Every Tuesday clear tracked Discord message IDs
+  const today = new Date();
+
+  if (today.getDay() === 2) {
+
+    const teamSheet =
+      SpreadsheetApp
+        .getActiveSpreadsheet()
+        .getSheetByName(TEAM_SHEET_NAME);
+
+    if (teamSheet) {
+
+      const lastRow = teamSheet.getLastRow();
+
+      if (lastRow > 1) {
+
+        teamSheet
+          .getRange(2, 4, lastRow - 1, 1)
+          .clearContent();
+
+        console.log(
+          "[EcoCupid] Cleared weekly Discord message tracking IDs."
+        );
+
+      }
+
+    }
+
+  }
+
+}
+
+/**
+ * Updates the production Discord task board.
+ */
+function manualDiscordBroadcast() {
+
+  const ui = SpreadsheetApp.getUi();
+
+  ui.alert(
+    "📢 Updating Discord Task Board",
+    "The production Discord task board is now being updated.\n\nThis process may take several minutes because Discord limits how quickly messages can be updated.\n\nA confirmation message will appear once the update is complete.",
+    ui.ButtonSet.OK
+  );
+
+  sendWeeklySummaryByAssignee(1500);
+
+  ui.alert(
+    "✅ Discord Task Board Updated",
+    "The production Discord task board has been refreshed successfully.",
+    ui.ButtonSet.OK
+  );
+
+}
+
+/**
+ * Updates the sandbox Discord task board.
+ */
+function manualDiscordTestButton() {
+
+  const ui = SpreadsheetApp.getUi();
+
+  ui.alert(
+    "🧪 Updating Sandbox Task Board",
+    "The sandbox Discord task board is now being updated.\n\nThis process may take a few minutes while the test messages are refreshed.\n\nA confirmation message will appear once the update is complete.",
+    ui.ButtonSet.OK
+  );
+
+  sendWeeklySummaryByAssignee(1000);
+
+  ui.alert(
+    "✅ Sandbox Task Board Updated",
+    "The sandbox Discord task board has been refreshed successfully.",
+    ui.ButtonSet.OK
+  );
+
+}
